@@ -13,9 +13,7 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
   'use strict'; // wraps everything for which we can use strict mode -JC
 
   var log = function(message) {
-    if(!__quiet) { // mongo shell param, coming from https://github.com/mongodb/mongo/blob/5fc306543cd3ba2637e5cb0662cc375f36868b28/src/mongo/shell/dbshell.cpp#L624
-      print(message);
-    }
+    print(message);
   };
 
   log('Variety: A MongoDB Schema Analyzer');
@@ -33,10 +31,10 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
   var knownDatabases = db.adminCommand('listDatabases').databases;
   if(typeof knownDatabases !== 'undefined') { // not authorized user receives error response (json) without databases key
     knownDatabases.forEach(function(d){
-      if(db.getSisterDB(d.name).getCollectionNames().length > 0) {
+      if(db.getSiblingDB(d.name).getCollectionNames().length > 0) {
         dbs.push(d.name);
       }
-      if(db.getSisterDB(d.name).getCollectionNames().length === 0) {
+      if(db.getSiblingDB(d.name).getCollectionNames().length === 0) {
         emptyDbs.push(d.name);
       }
     });
@@ -59,7 +57,7 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
         'Please see https://github.com/variety/variety for details.';
   }
 
-  if (db.getCollection(collection).count() === 0) {
+  if (db[collection].countDocuments({}, {limit: 1}) === 0) {
     throw 'The collection specified (' + collection + ') in the database specified ('+ db +') does not exist or is empty.\n'+
         'Possible collection options for database specified: ' + collNames + '.';
   }
@@ -69,11 +67,11 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
     var read = function(name, defaultValue) {
       var value = typeof configProvider[name] !== 'undefined' ? configProvider[name] : defaultValue;
       config[name] = value;
-      log('Using '+name+' of ' + tojson(value));
+      log('Using ' + name + ' of ' + JSON.stringify(value));
     };
     read('collection', null);
     read('query', {});
-    read('limit', db.getCollection(config.collection).find(config.query).count());
+    read('limit', db[config.collection].find(config.query || {}).count());
     read('maxDepth', 99);
     read('sort', {_id: -1});
     read('outputFormat', 'ascii');
@@ -96,9 +94,10 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
   var config = readConfig(this);
 
   var PluginsClass = function(context) {
-    var parsePath = function(val) { return val.slice(-3) !== '.js' ? val + '.js' : val;};
+    var parsePath = function(val) { val = val.trim(); return val.slice(-3) !== '.js' ? val + '.js' : val;};
     var parseConfig = function(val) {
       var config = {};
+      val = val.trim();
       val.split('&').reduce(function(acc, val) {
         var parts = val.split('=');
         acc[parts[0]] = parts[1];
@@ -111,8 +110,10 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
       this.plugins = context.plugins.split(',')
       .map(function(path){return path.trim();})
       .map(function(definition){
-        var path = parsePath(definition.split('|')[0]);
-        var config = parseConfig(definition.split('|')[1] || '');
+        definition = definition.split('|');
+        if(definition[0].trim().length <= 3) return {};
+        var path = parsePath(definition[0]);
+        var config = parseConfig(definition[1] || '');
         context.module = context.module || {};
         load(path);
         var plugin = context.module.exports;
@@ -124,7 +125,7 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
       }, this);
     } else {
       this.plugins = [];
-    }
+    };
 
     this.execute = function(methodName) {
       var args = Array.prototype.slice.call(arguments, 1);
@@ -134,7 +135,9 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
       });
     };
 
-    log('Using plugins of ' + tojson(this.plugins.map(function(plugin){return plugin.path;})));
+    log('Using plugins of ' + JSON.stringify(this.plugins.map(p => p.path)));
+
+    return this;
   };
 
   var $plugins = new PluginsClass(this);
@@ -327,23 +330,17 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
     return !item._id.key.match(arrayRegex);
   };
 
-// sort desc by totalOccurrences or by key asc if occurrences equal
+  // sort desc by totalOccurrences or by key asc if occurrences equal
   var comparator = function(a, b) {
     var countsDiff = b.totalOccurrences - a.totalOccurrences;
     return countsDiff !== 0 ? countsDiff : a._id.key.localeCompare(b._id.key);
   };
 
-  // extend standard MongoDB cursor of reduce method - call forEach and combine the results
-  DBQuery.prototype.reduce = function(callback, initialValue) {
-    var result = initialValue;
-    this.forEach(function(obj){
-      result = callback(result, obj);
-    });
-    return result;
-  };
-
-  var cursor = db.getCollection(config.collection).find(config.query).sort(config.sort).limit(config.limit);
-  var interimResults = cursor.reduce(reduceDocuments, {});
+  var cursor = db[config.collection].find(config.query).sort(config.sort).limit(config.limit);
+  var interimResults = {};
+  cursor.forEach((obj) => {
+    interimResults = reduceDocuments(interimResults, obj);
+  });
   var varietyResults = convertResults(interimResults, cursor.size())
   .filter(filter)
   .sort(comparator);
@@ -366,8 +363,8 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
 
     // replace results collection
     log('replacing results collection: '+ resultsCollectionName);
-    resultsDB.getCollection(resultsCollectionName).drop();
-    resultsDB.getCollection(resultsCollectionName).insert(varietyResults);
+    resultsDB[resultsCollectionName].drop();
+    resultsDB[resultsCollectionName].insert(varietyResults);
   }
 
   var createAsciiTable = function(results) {
@@ -420,5 +417,4 @@ Released by Maypop Inc, © 2012–2023, under the MIT License. */
   } else {
     print(createAsciiTable(varietyResults)); // output nice ascii table with results
   }
-
 }.bind(this)()); // end strict mode
